@@ -54,3 +54,4 @@ pytest -q
 ```
 date,game_id,away_team,home_team,starter_away,starter_home,prob_yrfi,ci_low,ci_high,book_prob_yrfi,book_prob_nrfi,edge_yrfi,edge_nrfi,rec_side,kelly_fraction,decimal_odds_used,notes
 ```
+"refresh index"
