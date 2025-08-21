@@ -15,24 +15,44 @@ def _eb_shrink(rate: pd.Series, n: pd.Series, prior: float, strength: float) -> 
     n = n.fillna(0).clip(lower=0)
     return ((rate * n) + (prior * strength)) / (n + strength)
 
-def _to_game_level(df: pd.DataFrame, keys: List[str] = ["game_id", "game_pk"]) -> pd.DataFrame:
+# features.py
+
+import pandas as pd
+import numpy as np
+from pandas.api.types import (
+    is_numeric_dtype,
+    is_bool_dtype,
+    is_datetime64_any_dtype,
+    is_datetime64tz_dtype,
+)
+
+def _to_game_level(df: pd.DataFrame, keys):
     """
-    Collapse any per-side/per-entity rows to *one row per game*.
-    - numeric columns -> mean
-    - datetime columns -> min
-    - drop everything else (non-numeric, non-datetime) to keep matrix numeric-only
+    Collapse row-level features to one row per game.
+    Aggregation rules:
+      - numeric and bool -> mean
+      - datetimes (tz-aware or naive) -> max
+      - everything else -> first
     """
+    if not set(keys).issubset(df.columns):
+        missing = list(set(keys) - set(df.columns))
+        raise KeyError(f"_to_game_level missing key columns: {missing}")
+
     cols = [c for c in df.columns if c not in keys]
     agg = {}
     for c in cols:
-        if np.issubdtype(df[c].dtype, np.number) or pd.api.types.is_bool_dtype(df[c]):
+        s = df[c]
+        if is_numeric_dtype(s) or is_bool_dtype(s):
             agg[c] = "mean"
-        elif np.issubdtype(df[c].dtype, np.datetime64):
-            agg[c] = "min"
-        # ignore other types (strings, categoricals), not used by the model matrix
-    if not agg:
-        return df.drop_duplicates(keys)
-    return df.groupby(keys, as_index=False).agg(agg)
+        elif is_datetime64_any_dtype(s) or is_datetime64tz_dtype(s):
+            # Pandas can compare tz-aware within same tz. If you prefer UTC-naive, uncomment below.
+            # s = s.dt.tz_convert("UTC").dt.tz_localize(None)
+            agg[c] = "max"
+        else:
+            agg[c] = "first"
+
+    out = df.groupby(keys, as_index=False).agg(agg)
+    return out
 
 
 # ----------------------------
