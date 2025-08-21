@@ -1,0 +1,11 @@
+stadium,team_code,team_name,lat,lon,timezone
+Yankee Stadium,NYY,New York Yankees,40.8296,-73.9262,America/New_York
+Fenway Park,BOS,Boston Red Sox,42.3467,-71.0972,America/New_York
+Dodger Stadium,LAD,Los Angeles Dodgers,34.0739,-118.24,America/Los_Angeles
+Wrigley Field,CHC,Chicago Cubs,41.9484,-87.6553,America/Chicago
+Oracle Park,SF,San Francisco Giants,37.7786,-122.3893,America/Los_Angeles
+Coors Field,COL,Colorado Rockies,39.7559,-104.9942,America/Denver
+Minute Maid Park,HOU,Houston Astros,29.7571,-95.3555,America/Chicago
+Tropicana Field,TB,Tampa Bay Rays,27.7682,-82.6534,America/New_York
+Citi Field,NYM,New York Mets,40.7571,-73.8458,America/New_York
+Target Field,MIN,Minnesota Twins,44.9817,-93.2776,America/Chicago

@@ -1,0 +1,58 @@
+# Reproducible defaults: quick window so first run is fast
+project:
+  name: nrfi_yrfi
+  seed: 42
+  use_duckdb: true
+  log_level: INFO
+  time_zone_default: America/New_York
+
+paths:
+  data_dir: data
+  raw_dir: data/raw
+  processed_dir: data/processed
+  reference_dir: data/reference
+  sample_dir: data/sample
+  outputs_dir: outputs
+  reports_dir: reports
+  odds_dir: data/odds
+
+training:
+  # Small window to keep runtime low; expand later
+  start_date: "2021-04-01"
+  end_date: "2024-05-15"
+  min_games_required: 10
+  n_folds: 3
+  fold_granularity: "M"   # Monthly time splits
+
+model:
+  use_xgb: true
+  xgb_params:
+    n_estimators: 200
+    max_depth: 3
+    learning_rate: 0.08
+    subsample: 0.9
+    colsample_bytree: 0.9
+    reg_lambda: 1.0
+    reg_alpha: 0.0
+    n_jobs: -1
+  calibration: "isotonic"
+  bootstrap:
+    enabled: true
+    n_boot: 200
+    block_unit: "D"
+    block_size: 3
+
+features:
+  lineup_samples: 25
+  min_history_days: 14
+  eb_prior_strength: 50
+  default_first_pitch_local_time: "19:00"  # 7 PM local
+
+odds:
+  kelly_fraction_cap: 0.25
+  min_edge_abs: 0.02
+  min_ci_half_width: 0.06
+
+backtest:
+  bankroll_start: 1000
+  flat_stake: 10.0

@@ -1,0 +1,22 @@
+# Jupyter
+.ipynb_checkpoints/
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Editors/OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Ignore the entire Data folder
+Data/
+
