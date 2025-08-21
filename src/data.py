@@ -7,6 +7,25 @@ import pandas as pd
 import numpy as np
 from utils import (assert_non_empty, assert_columns, Timer)
 
+TEAM_ABBR_MAP = {
+    "ARI": "ARI", "ATL": "ATL", "BAL": "BAL", "BOS": "BOS",
+    "CHC": "CHC", "CHW": "CHW", "CWS": "CHW",
+    "CIN": "CIN", "CLE": "CLE", "COL": "COL", "DET": "DET",
+    "HOU": "HOU", "KC": "KC", "KCR": "KC",
+    "LAA": "LAA", "ANA": "LAA",
+    "LAD": "LAD", "MIA": "MIA", "FLA": "MIA",
+    "MIL": "MIL", "MIN": "MIN", "NYM": "NYM", "NYY": "NYY",
+    "OAK": "OAK", "PHI": "PHI", "PIT": "PIT",
+    "SD": "SD", "SDP": "SD",
+    "SEA": "SEA", "SF": "SF", "SFG": "SF",
+    "STL": "STL", "TB": "TB", "TBR": "TB",
+    "TEX": "TEX", "TOR": "TOR",
+    "WSH": "WSH", "WSN": "WSH", "WAS": "WSH",
+}
+
+def normalize_team_codes(s: pd.Series) -> pd.Series:
+    return s.replace(TEAM_ABBR_MAP)
+
 @dataclass
 class DataManager:
     data_dir: Path
@@ -85,73 +104,150 @@ def build_first_inning_labels(pbp: pd.DataFrame) -> pd.DataFrame:
     req = ["game_pk", "game_date", "inning", "inning_topbot", "home_team", "away_team"]
     assert_columns(pbp, req, "build_first_inning_labels")
     df = pbp.copy()
+
+    # attempt to standardize datetime fields
     df["game_datetime_utc"] = pd.to_datetime(df.get("game_datetime_utc", pd.NaT), utc=True, errors="coerce")
     df["game_time_utc"]     = pd.to_datetime(df.get("game_time_utc", df["game_datetime_utc"]), utc=True, errors="coerce")
 
+    # restrict to first inning
     df1 = df[df["inning"] == 1].copy()
-    if "rbi" in df1.columns:
-        by_game = df1.groupby("game_pk", as_index=False).agg(
-            first_inning_runs=("rbi", "sum"),
+
+    # Preferred: detect runs by SCORE CHANGES (handles runs with no RBI)
+    has_scores = {"home_score", "away_score"}.issubset(df1.columns)
+    if has_scores:
+        # ensure chronological order within each game
+        df1 = df1.sort_values(["game_pk", "game_time_utc", "game_datetime_utc"])
+
+        def _runs_in_inning(g):
+            dh = (g["home_score"].max() - g["home_score"].min())
+            da = (g["away_score"].max() - g["away_score"].min())
+            return int(max(0, dh) + max(0, da))
+
+        by_game = (
+            df1.groupby("game_pk", as_index=False)
+               .agg(first_inning_runs=("home_score", "first"))  # temp col
+        )
+        # compute via apply to keep it simple/robust
+        r = df1.groupby("game_pk").apply(_runs_in_inning).rename("first_inning_runs")
+        by_game = by_game.drop(columns=["first_inning_runs"]).merge(r.reset_index(), on="game_pk", how="left")
+
+        # plus carry metadata (date/teams/times)
+        meta = df1.groupby("game_pk", as_index=False).agg(
             game_date=("game_date", "first"),
             game_time_utc=("game_time_utc", "first"),
             home_team=("home_team", "first"),
             away_team=("away_team", "first"),
         )
+        by_game = by_game.merge(meta, on="game_pk", how="left")
+
     else:
-        df1["runs_proxy"] = np.where(df1["events"].fillna("").str.contains("home_run"), 1, 0)
+        # Fallback (when statcast doesn't include scores): use RBI + textual hints
+        # NOTE: RBI misses WP/PB/balk/error—try to catch via 'description'.
+        if "rbi" not in df1.columns:
+            df1["rbi"] = 0
+        desc = df1.get("description", pd.Series([""] * len(df1)))
+        ev = df1.get("events", pd.Series([""] * len(df1)))
+        scored_text = desc.fillna("").str.contains("scores", case=False)
+        wp_pb_balk = ev.fillna("").str.contains("wild_pitch|passed_ball|balk", case=False)
+
+        df1["run_flag"] = (df1["rbi"] > 0) | scored_text | wp_pb_balk
+
         by_game = df1.groupby("game_pk", as_index=False).agg(
-            first_inning_runs=("runs_proxy", "sum"),
+            first_inning_runs=("run_flag", "sum"),
             game_date=("game_date", "first"),
             game_time_utc=("game_time_utc", "first"),
             home_team=("home_team", "first"),
             away_team=("away_team", "first"),
         )
+
     by_game["yrfi"] = (by_game["first_inning_runs"] > 0).astype(int)
     by_game["game_datetime_utc"] = pd.to_datetime(by_game["game_time_utc"], utc=True)
     by_game["date"] = pd.to_datetime(by_game["game_date"])
     by_game["game_id"] = by_game["date"].dt.strftime("%Y-%m-%d") + "_" + by_game["away_team"] + "_" + by_game["home_team"]
     return by_game[["date","game_id","game_pk","game_datetime_utc","away_team","home_team","yrfi"]]
 
-    # --- Add to src/data.py ---
-TEAM_ABBR_MAP = {
-    # Normalize API / PBP discrepancies as needed
-    "WSN": "WSH", "WAS": "WSH",
-    "CWS": "CHW", "KCR": "KC", "TBR": "TB", "SFG": "SF", "LAA": "ANA",  # adjust to your PBP codes
-    # add more iff your Statcast abbreviations differ from Stats API
-}
 
 def normalize_team_codes(s: pd.Series) -> pd.Series:
     return s.replace(TEAM_ABBR_MAP)
 
-def attach_scheduled_times(labels: pd.DataFrame,
-                           stadiums: pd.DataFrame,
-                           default_local_time: str = "19:00") -> pd.DataFrame:
+
+def attach_scheduled_times(
+    labels: pd.DataFrame,
+    stadiums: pd.DataFrame,
+    default_local_time: str = "19:00",
+    reference_dir: Path | str | None = None,
+    use_schedule: bool = True,
+    cache_seconds: int = 86400  # 1 day
+) -> pd.DataFrame:
     """
-    Fills labels['game_datetime_utc'] with schedule times when available,
-    else imputes using stadium timezone + default local first pitch.
+    Attaches game_datetime_utc to labels.
+      1) Try cached MLB schedule by day (fast)
+      2) If not cached and use_schedule=True, hit API, then cache
+      3) Impute any remaining with stadium timezone + default_local_time
+
+    Works offline after first pass due to cache.
     """
     labels = labels.copy()
     labels["date"] = pd.to_datetime(labels["date"])
-    # 1) Try MLB schedule by day (robust to offline fallback via fetch_schedule_probables)
-    dates = sorted(labels["date"].dt.date.unique())
-    sched_parts = []
-    for d in dates:
-        sd = fetch_schedule_probables(str(d))  # already returns UTC datetimes
-        if not sd.empty:
-            sd["away_team"] = normalize_team_codes(sd["away_team"])
-            sd["home_team"] = normalize_team_codes(sd["home_team"])
-            sd["game_id"] = pd.to_datetime(sd["date"]).dt.strftime("%Y-%m-%d") + "_" + sd["away_team"] + "_" + sd["home_team"]
-            sched_parts.append(sd[["game_id","game_datetime_utc","game_pk"]])
-    schedule = pd.concat(sched_parts, ignore_index=True) if sched_parts else pd.DataFrame(columns=["game_id","game_datetime_utc","game_pk"])
+    sched_cols = ["game_id", "game_datetime_utc", "game_pk"]
+    schedule = pd.DataFrame(columns=sched_cols)
 
-    # 2) Merge schedule first
-    out = labels.merge(schedule[["game_id","game_datetime_utc"]], on="game_id", how="left", suffixes=("","_sched"))
+    # Where to cache per-day schedule pulls
+    cache_root = Path(reference_dir) if reference_dir else Path("data/reference")
+    cache_dir = cache_root / "schedule_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
 
-    # 3) Impute where missing using stadium timezone + default_local_time
+    if use_schedule:
+        dates = sorted(labels["date"].dt.date.unique())
+        parts = []
+        now = pd.Timestamp.utcnow()
+
+        for d in dates:
+            cf = cache_dir / f"{d.isoformat()}.parquet"
+            use_cache = cf.exists()
+            if use_cache:
+                # honor staleness window
+                age = now - pd.to_datetime(pd.Timestamp(cf.stat().st_mtime, unit="s"), utc=True)
+                if age.total_seconds() <= cache_seconds:
+                    try:
+                        parts.append(pd.read_parquet(cf))
+                        continue
+                    except Exception:
+                        pass  # fall through to refetch
+
+            # fetch live; on any error just skip to impute path later
+            try:
+                sd = fetch_schedule_probables(d.isoformat())  # returns UTC datetimes
+                if not sd.empty:
+                    sd["away_team"] = normalize_team_codes(sd["away_team"])
+                    sd["home_team"] = normalize_team_codes(sd["home_team"])
+                    sd["game_id"] = sd["date"].dt.strftime("%Y-%m-%d") + "_" + sd["away_team"] + "_" + sd["home_team"]
+                    keep = sd[["game_id", "game_datetime_utc", "game_pk"]].copy()
+                    parts.append(keep)
+                    # cache for next time
+                    try:
+                        keep.to_parquet(cf, index=False)
+                    except Exception:
+                        pass
+            except Exception:
+                # ignore; we will impute below
+                continue
+
+        if parts:
+            schedule = pd.concat(parts, ignore_index=True)
+            # de-dup just in case
+            schedule = schedule.drop_duplicates(subset=["game_id"])
+
+    # 1) Merge schedule times if we have any
+    out = labels.merge(schedule[["game_id", "game_datetime_utc"]], on="game_id", how="left")
+
+    # 2) Impute where missing using stadium tz + default_local_time
     need = out["game_datetime_utc"].isna()
     if need.any():
-        st = stadiums[["team_code","timezone"]].rename(columns={"team_code":"home_team"})
-        tmp = out.loc[need].merge(st, on="home_team", how="left")
+        assert_columns(stadiums, ["team_code", "timezone"], "stadiums ref")
+        tz_map = stadiums[["team_code", "timezone"]].rename(columns={"team_code": "home_team"})
+        tmp = out.loc[need].merge(tz_map, on="home_team", how="left")
+
         local_naive = pd.to_datetime(tmp["date"].dt.strftime("%Y-%m-%d") + " " + default_local_time)
         # localize by stadium tz then convert to UTC
         local = local_naive.dt.tz_localize(tmp["timezone"].fillna("UTC"), nonexistent="NaT", ambiguous="NaT")
@@ -159,6 +255,7 @@ def attach_scheduled_times(labels: pd.DataFrame,
         out.loc[need, "game_datetime_utc"] = utc.values
 
     return out
+
 
 # -------------------
 # Stadiums & park factors
